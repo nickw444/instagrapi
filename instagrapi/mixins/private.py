@@ -14,6 +14,7 @@ from instagrapi.exceptions import (
     ClientConnectionError,
     ClientError,
     ClientForbiddenError,
+    ClientGraphqlError,
     ClientJSONDecodeError,
     ClientNotFoundError,
     ClientRequestTimeout,
@@ -65,6 +66,8 @@ class PrivateRequestMixin:
     """
     Helpers for private request
     """
+    GRAPHQL_PUBLIC_API_URL = "https://www.instagram.com/graphql/query/"
+
     private_requests_count = 0
     handle_exception = None
     challenge_code_handler = manual_input_code
@@ -269,13 +272,17 @@ class PrivateRequestMixin:
         # if self.user_id and login:
         #     raise Exception(f"User already logged ({self.user_id})")
         try:
-            if not endpoint.startswith('/'):
-                endpoint = f"/v1/{endpoint}"
+            if endpoint.startswith('http'):
+                api_url = endpoint
+            else:
+                if not endpoint.startswith('/'):
+                    endpoint = f"/v1/{endpoint}"
 
-            if endpoint == '/challenge/': # wow so hard, is it safe tho?
-                endpoint = '/v1/challenge/'
+                if endpoint == '/challenge/': # wow so hard, is it safe tho?
+                    endpoint = '/v1/challenge/'
 
-            api_url = f"https://{config.API_DOMAIN}/api{endpoint}"
+                api_url = f"https://{config.API_DOMAIN}/api{endpoint}"
+
             if data:  # POST
                 # Client.direct_answer raw dict
                 # data = json.dumps(data)
@@ -454,3 +461,55 @@ class PrivateRequestMixin:
                 return self.last_json
             return self._send_private_request(endpoint, **kwargs)
         return self.last_json
+
+
+    def private_graphql_request(
+        self,
+        variables,
+        query_hash=None,
+        query_id=None,
+        data=None,
+        params=None,
+        headers=None,
+    ):
+        assert query_id or query_hash, "Must provide valid one of: query_id, query_hash"
+        default_params = {"variables": json.dumps(variables, separators=(",", ":"))}
+        if query_id:
+            default_params["query_id"] = query_id
+
+        if query_hash:
+            default_params["query_hash"] = query_hash
+
+        if params:
+            params.update(default_params)
+        else:
+            params = default_params
+
+        try:
+            body_json = self.private_request(
+                self.GRAPHQL_PUBLIC_API_URL,
+                data=data,
+                params=params,
+                headers=headers,
+            )
+
+            if body_json.get("status", None) != "ok":
+                raise ClientGraphqlError(
+                    "Unexpected status '{}' in response. Message: '{}'".format(
+                        body_json.get("status", None), body_json.get("message", None)
+                    ),
+                    response=body_json,
+                )
+
+            return body_json["data"]
+
+        except ClientBadRequestError as e:
+            message = None
+            try:
+                body_json = e.response.json()
+                message = body_json.get("message", None)
+            except JSONDecodeError:
+                pass
+            raise ClientGraphqlError(
+                "Error: '{}'. Message: '{}'".format(e, message), response=e.response
+            )
